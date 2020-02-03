@@ -2,11 +2,39 @@
 " Description: mypy support for optional python typechecking
 
 call ale#Set('python_mypy_executable', 'mypy')
+call ale#Set('python_mypy_daemon_executable', 'dmypy')
+call ale#Set('python_mypy_daemon_status_file', '.dmypy.json')
 call ale#Set('python_mypy_ignore_invalid_syntax', 0)
 call ale#Set('python_mypy_show_notes', 1)
 call ale#Set('python_mypy_options', '')
+call ale#Set('python_mypy_daemon_options', '--follow-imports=skip')
+call ale#Set('python_mypy_autostart_daemon', 0)
+call ale#Set('python_mypy_use_daemon', 1)
 call ale#Set('python_mypy_use_global', get(g:, 'ale_use_global_executables', 0))
+call ale#Set('python_mypy_daemon_use_global', get(g:, 'ale_use_global_executables', 0))
 call ale#Set('python_mypy_auto_pipenv', 0)
+
+function! s:FindDaemonFile(buffer) abort
+    let l:status_file =  ale#Var(a:buffer, 'python_mypy_daemon_status_file')
+    for l:path in ale#path#Upwards(expand('#' . a:buffer . ':p:h'))
+        if filereadable(l:path . '/' . l:status_file)
+            return l:path
+        endif
+    endfor
+endfunction
+
+function! s:DaemonEnabled(buffer) abort
+    if ale#Var(a:buffer, 'python_mypy_use_daemon')
+        if  ale#Var(a:buffer, 'python_mypy_autostart_daemon')
+            return 1
+        else
+            " If they want to use the daemon, but don't want to autostart it,
+            " check if it's running by looking for existence of the status file
+            return !empty(s:FindDaemonFile(a:buffer))
+        endif
+    endif
+    return 0
+endfunction
 
 function! ale_linters#python#mypy#GetExecutable(buffer) abort
     if (ale#Var(a:buffer, 'python_auto_pipenv') || ale#Var(a:buffer, 'python_mypy_auto_pipenv'))
@@ -14,7 +42,11 @@ function! ale_linters#python#mypy#GetExecutable(buffer) abort
         return 'pipenv'
     endif
 
-    return ale#python#FindExecutable(a:buffer, 'python_mypy', ['mypy'])
+    if s:DaemonEnabled(a:buffer)
+        return ale#python#FindExecutable(a:buffer, 'python_mypy_daemon', ['dmypy'])
+    else
+        return ale#python#FindExecutable(a:buffer, 'python_mypy', ['mypy'])
+    endif
 endfunction
 
 " The directory to change to before running mypy
@@ -39,14 +71,24 @@ function! ale_linters#python#mypy#GetCommand(buffer) abort
     let l:dir = s:GetDir(a:buffer)
     let l:executable = ale_linters#python#mypy#GetExecutable(a:buffer)
 
+    let l:daemon_enabled = s:DaemonEnabled(a:buffer)
+    let l:pipenv_name = l:daemon_enabled ? 'dmypy' : 'mypy'
+
     let l:exec_args = l:executable =~? 'pipenv$'
-    \   ? ' run mypy'
+    \   ? ' run ' . l:pipenv_name
     \   : ''
+
+    let l:daemon_args = ''
+    if l:daemon_enabled
+        let l:daemon_args = ' --status-file '
+        \   . ale#Var(a:buffer, 'python_mypy_daemon_status_file')
+        \   . ' run -- ' . ale#Var(a:buffer, 'python_mypy_daemon_options')
+    endif
 
     " We have to always switch to an explicit directory for a command so
     " we can know with certainty the base path for the 'filename' keys below.
     return ale#path#CdString(l:dir)
-    \   . ale#Escape(l:executable) . l:exec_args
+    \   . ale#Escape(l:executable) . l:exec_args . l:daemon_args
     \   . ' --show-column-numbers '
     \   . ale#Var(a:buffer, 'python_mypy_options')
     \   . ' --shadow-file %s %t %s'
